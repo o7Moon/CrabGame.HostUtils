@@ -1,32 +1,47 @@
 using BepInEx;
 using BepInEx.IL2CPP;
+using BepInEx.Configuration;
 using HarmonyLib;
 using qol_core;
 using System.Collections.Generic;
+using UnityEngine.SceneManagement;
+using UnityEngine.Events;
+using UnityEngine;
 
 namespace hostutils
 {
     [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BasePlugin
     {
+        public static Plugin Instance;
         public static Mod qolcoremod;
 
         public static int forcedNextMap = -1;
+        public static int forcedNextMode = -1;
 
         public static Dictionary<string, int> mapnames;
+        public static Dictionary<string, int> modenames;
 
         public static bool isHost() {
             return SteamManager.Instance.prop_CSteamID_0 == SteamManager.Instance.prop_CSteamID_1;
         }
+
+        static ConfigEntry<bool> areSnowballsDisabled;
+        static ConfigEntry<bool> skipWinScreen;
         public override void Load()
         {
+            Instance = this;
             Harmony.CreateAndPatchAll(typeof(Plugin));
 
-            qolcoremod = Mods.RegisterMod(PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION, "Extra commands and options that make hosting lobbies nicer.");
+            SceneManager.sceneLoaded += (UnityAction<Scene,LoadSceneMode>) onSceneLoad;
+
+            qolcoremod = Mods.RegisterMod(PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION, "Extra commands and options that make hosting lobbies nicer.","o7Moon/CrabGame.HostUtils");
 
             Commands.RegisterCommand("forcenextmap", "forcenextmap (name|id)", "force the game to pick a specific map next.", qolcoremod, ForceNextMapCommand);
 
-            Commands.RegisterCommand("vaporize", "vaporize (name|num|steamid)", "instantly vaporize any player.", qolcoremod, KillCommand);
+            Commands.RegisterCommand("forcenextmode", "forcenextmode (name|id)", "force the game to pick a specific mode next.", qolcoremod, ForceNextModeCommand);
+
+            Commands.RegisterCommand("vaporize", "vaporize (name|num|steamid)", "instantly vaporize a player.", qolcoremod, KillCommand);
 
             Commands.RegisterCommand("steamid", "steamid (name|num|steamid)", "show a player's steamid in chat", qolcoremod, SteamIDCommand);
 
@@ -36,7 +51,23 @@ namespace hostutils
 
             Commands.RegisterCommand("start", "start", "starts the game", qolcoremod, StartCommand);
 
+            Commands.RegisterCommand("time", "time", "sets the round timer", qolcoremod, TimeCommand);
+
+            areSnowballsDisabled = Config.Bind<bool>("Lobby Settings", "Disable Snowballs", false, "if true, dont allow snowballs to be picked up.");
+
+            skipWinScreen = Config.Bind<bool>("Lobby Settings", "Skip Win Screen", false, "if true, skip the win screen.");
+
             Log.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
+        }
+
+        public void onSceneLoad(Scene s, LoadSceneMode m){
+            Config.Reload();
+        }
+
+        [HarmonyPatch(typeof(GameUI), nameof(GameUI.Update))]
+        [HarmonyPostfix]
+        public static void onGameUIUpdate(GameUI __instance) {
+            if (Input.GetKeyDown(KeyCode.F5)) Instance.Config.Reload();
         }
 
         [HarmonyPatch(typeof(SteamworksNative.SteamMatchmaking), nameof(SteamworksNative.SteamMatchmaking.SetLobbyData))]
@@ -47,6 +78,10 @@ namespace hostutils
                 mapnames = new Dictionary<string, int>();
                 foreach (Map map in MapManager.Instance.maps) {
                     mapnames.Add(map.name.Replace(" ","").ToLower(), map.id);
+                }
+                modenames = new Dictionary<string, int>();
+                foreach (GameModeData mode in GameModeManager.Instance.allGameModes) {
+                    modenames.Add(mode.name.Replace(" ","").ToLower(), mode.id);
                 }
             }
         }
@@ -60,6 +95,19 @@ namespace hostutils
                 string mapname = args.Join(null, " ").ToLower();
                 if (!mapnames.ContainsKey(mapname)) return false;
                 forcedNextMap = mapnames[mapname];
+            }
+            return true;
+        }
+
+        public static bool ForceNextModeCommand(List<string> arguments) {
+            if (!isHost()) return false;
+            if (System.Int32.TryParse(arguments[1], out int modeID)) {
+                forcedNextMode = modeID;
+            } else {
+                List<string> args = RemoveCommandFromArgs(arguments);
+                string modename = args.Join(null, " ").ToLower();
+                if (!modenames.ContainsKey(modename)) return false;
+                forcedNextMode = modenames[modename];
             }
             return true;
         }
@@ -120,11 +168,22 @@ namespace hostutils
         }
 
         public static bool SteamIDCommand(List<string> arguments) {
+            if (!isHost()) return false;
             List<string> args = RemoveCommandFromArgs(arguments);
             PlayerManager pm = GetPlayer(System.String.Join(" ", args), PlayerType.Both);
             if (pm == null) return false;
 
             qol_core.Plugin.SendMessage($"{pm.username}'s steamid is {pm.steamProfile}", qolcoremod);
+
+            return true;
+        }
+
+        public static bool TimeCommand(List<string> arguments) {
+            if (!isHost()) return false;
+            List<string> args = RemoveCommandFromArgs(arguments);
+            if (!float.TryParse(args[0], out float time)) return false;
+
+            GameManager.Instance.gameMode.freezeTimer.field_Private_Single_0 = time;
 
             return true;
         }
@@ -169,6 +228,29 @@ namespace hostutils
                 __0 = forcedNextMap;
                 forcedNextMap = -1;
             }
+        }
+
+        [HarmonyPatch(typeof(GameModeManager), nameof(GameModeManager.GetGameMode))]
+        [HarmonyPrefix]
+        public static void GetModeHook(GameModeManager __instance, ref int __0) {
+            if (!isHost()) return;
+            if (forcedNextMode > -1) {
+                __0 = forcedNextMode;
+                forcedNextMode = -1;
+            }
+        }
+        [HarmonyPatch(typeof(GameServer), nameof(GameServer.ForceGiveWeapon))]
+        [HarmonyPrefix]
+        public static bool onGiveWeapon(int __0) {
+            if (!isHost() || !areSnowballsDisabled.Value || __0 != 9) return true;
+            return false;
+        }
+        [HarmonyPatch(typeof(ServerSend), nameof(ServerSend.GameOver))]
+        [HarmonyPrefix]
+        public static bool onWinScreen(ulong __0) {
+            if (!isHost() || !skipWinScreen.Value) return true;
+            GameLoop.Instance.RestartLobby();
+            return false;
         }
     }
 }
