@@ -241,8 +241,9 @@ namespace hostutils
         }
         [HarmonyPatch(typeof(GameServer), nameof(GameServer.ForceGiveWeapon))]
         [HarmonyPrefix]
-        public static bool onGiveWeapon(int __0) {
-            if (!isHost() || !areSnowballsDisabled.Value || __0 != 9) return true;
+        [HarmonyPriority(403)]
+        public static bool onGiveWeapon(ulong __0, int __1, int __2) {
+            if (!isHost() || !areSnowballsDisabled.Value || __1 != 9) return true;
             return false;
         }
         [HarmonyPatch(typeof(ServerSend), nameof(ServerSend.GameOver))]
